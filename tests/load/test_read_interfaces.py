@@ -852,25 +852,28 @@ def test_where(populated_pipeline: Pipeline) -> None:
 @pytest.mark.essential
 def test_relation_incremental_datetime_on_dataset(populated_pipeline: Pipeline) -> None:
     """End-to-end: dataset.table('items').incremental(<datetime cursor>) on every destination."""
-    items = populated_pipeline.dataset().items
+    items = populated_pipeline.dataset().table("items")
     total_records = _total_records(populated_pipeline.destination.destination_type)
     last_dt = ITEMS_EPOCH + timedelta(seconds=total_records - 1)
 
     # post-run state matches what `bind()` persisted: start_value snapshot == last_value
     cached_state: IncrementalColumnState = {
         "initial_value": ITEMS_EPOCH,
-        "last_value": last_dt,
+        "last_value": None,
         "start_value": last_dt,
         "unique_hashes": [],
     }
 
     def _bind(incr: Incremental[Any], instance_start_value: Any = None) -> Incremental[Any]:
         incr._cached_state = copy(cached_state)
+        # set deduplication key on "created_at" to make it unique
+        incr.set_deduplication_key("created_at", from_hints=False)
         incr.start_value = instance_start_value if instance_start_value is not None else last_dt
         return incr
 
     # 1. bound, no lag, no end_value — lower = last_dt, no upper, keeps the last row
     incr = _bind(dlt.sources.incremental[pendulum.DateTime]("created_at"))
+    # upper boundary included thanks to "created_at" being unique
     assert len(items.incremental(incr).fetchall()) == 1
 
     # 2. lag — start_value = last_dt - 5s; no upper bound; includes last_dt itself
@@ -917,21 +920,27 @@ def test_relation_incremental_datetime_on_dataset(populated_pipeline: Pipeline) 
 @pytest.mark.essential
 def test_relation_incremental_date_on_dataset(populated_pipeline: Pipeline) -> None:
     """End-to-end: dataset.table('daily_items').incremental(<date cursor>) on every destination."""
-    daily = populated_pipeline.dataset().daily_items
+    daily = populated_pipeline.dataset().table("daily_items")
     total_records = _total_records(populated_pipeline.destination.destination_type)
     epoch_date = ITEMS_EPOCH.date()
     last_date = epoch_date + timedelta(days=total_records - 1)
 
     cached_state: IncrementalColumnState = {
-        "initial_value": epoch_date,
-        "last_value": last_date,
-        "start_value": last_date,
+        "initial_value": epoch_date.subtract(days=1),
+        "last_value": None,
+        "start_value": last_date.subtract(days=1),
         "unique_hashes": [],
     }
 
     def _bind(incr: Incremental[Any], instance_start_value: Any = None) -> Incremental[Any]:
         incr._cached_state = copy(cached_state)
-        incr.start_value = instance_start_value if instance_start_value is not None else last_date
+        incr.initial_value = cached_state["initial_value"]
+        # this will include the upper boundary but also assumes that days are unique
+        incr.range_start = "open"
+        incr.range_end = "closed"
+        incr.start_value = (
+            instance_start_value if instance_start_value is not None else last_date.subtract(days=1)
+        )
         return incr
 
     # 1. bound, no end_value — lower = last_date, keeps the last day only
@@ -939,14 +948,14 @@ def test_relation_incremental_date_on_dataset(populated_pipeline: Pipeline) -> N
     assert len(daily.incremental(incr).fetchall()) == 1
 
     # 2. wider lower bound — last_date - 5 days, inclusive, yields 6 days
-    lagged_start = last_date - timedelta(days=5)
+    lagged_start = last_date - timedelta(days=6)
     incr_lag = _bind(
         dlt.sources.incremental[date]("created_date"), instance_start_value=lagged_start
     )
     assert len(daily.incremental(incr_lag).fetchall()) == 6
 
     # 3. unbound, initial_value is a datetime — coerced to its calendar date, keeps every row
-    incr_unbound = dlt.sources.incremental[date]("created_date", initial_value=ITEMS_EPOCH)
+    incr_unbound = dlt.sources.incremental[date]("created_date")
     assert len(daily.incremental(incr_unbound).fetchall()) == total_records
 
     # 4. unbound with range modifiers and explicit end_value

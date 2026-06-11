@@ -46,10 +46,10 @@ from dlt.destinations.sql_client import SqlClientBase, WithSchemas, WithSqlClien
 from dlt.destinations.queries import bind_query, build_select_expr, make_expand_table_name
 from dlt.common.destination.dataset import SupportsDataAccess
 from dlt.dataset._incremental import (
-    _apply_incremental,
+    apply_incremental,
     _build_incremental_aggregate,
-    _parse_incremental_cursor_path,
-    _raise_incomplete_cursor_column,
+    parse_incremental_cursor_path,
+    raise_incomplete_cursor_column,
     _RelationIncrementalContext,
 )
 from dlt.dataset._join import (
@@ -619,7 +619,7 @@ class Relation(WithSqlClient):
             f"`other` must be a table name or a `dlt.Relation`, got `{type(other).__name__}`."
         )
 
-    def incremental(self, incremental: Incremental[Any], *, advance: bool = False) -> Self:
+    def incremental(self, incremental: Incremental[Any], *, advance: bool = True) -> Self:
         """Filter this relation to a cursor range using an Incremental.
 
         Translates the `Incremental` bounds (`initial_value`/`end_value`, `range_start`/
@@ -638,14 +638,14 @@ class Relation(WithSqlClient):
         Returns:
             Self: A new relation with the incremental filter applied.
         """
-        table_name, column_name = _parse_incremental_cursor_path(incremental.cursor_path)
+        table_name, column_name = parse_incremental_cursor_path(incremental.cursor_path)
         naming = self._dataset.schema.naming
         column_name = naming.normalize_identifier(column_name)
 
         if table_name is None:
             relation_columns = self.columns_schema
             if column_name not in relation_columns:
-                _raise_incomplete_cursor_column(incremental.cursor_path, "this relation")
+                raise_incomplete_cursor_column(incremental.cursor_path, "this relation")
             return self._apply_incremental(
                 incremental=incremental,
                 target_query=self.sqlglot_expression,
@@ -667,7 +667,7 @@ class Relation(WithSqlClient):
             )
         target_columns = self._dataset.schema.get_table_columns(table_name)
         if column_name not in target_columns:
-            _raise_incomplete_cursor_column(incremental.cursor_path, f"table `{table_name}`")
+            raise_incomplete_cursor_column(incremental.cursor_path, f"table `{table_name}`")
         if self._table_name not in _extract_joined_table_aliases(
             self.sqlglot_expression, self._dataset.dataset_name
         ):
@@ -719,7 +719,7 @@ class Relation(WithSqlClient):
             agg_rel._incremental_ctx = None
             return agg_rel.fetchscalar()
 
-        final_query, ctx = _apply_incremental(
+        final_query, ctx = apply_incremental(
             incremental=incremental,
             target_query=target_query,
             column_ref=column_ref,
@@ -748,7 +748,7 @@ class Relation(WithSqlClient):
         if incremental is not None:
             # apply the incremental — adds join for qualified cursors, WHERE for bounds.
             # existing joins/ctx are reused via _extract_joined_table_aliases.
-            return self.incremental(incremental)._incremental_aggregate_relation()
+            return self.incremental(incremental, advance=False)._incremental_aggregate_relation()
         if self._incremental_ctx is None:
             return None
         agg_query = _build_incremental_aggregate(

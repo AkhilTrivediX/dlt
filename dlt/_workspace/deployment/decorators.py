@@ -10,6 +10,7 @@ from dlt.common.pipeline import SupportsPipeline, TRefreshMode
 from dlt.common.reflection.inspect import iscoroutinefunction
 from dlt.common.typing import AnyFun, Generic, ParamSpec
 from dlt.common.utils import get_callable_name, get_module_name
+from dlt.common.warnings import apply_deprecations
 
 from dlt._workspace import known_sections as ws_known_sections
 from dlt._workspace.deployment import freshness as _freshness
@@ -36,6 +37,7 @@ from dlt._workspace.deployment.typing import (
     TInterfaceType,
     TIntervalSpec,
     TJobDefinition,
+    TJobDefinitionDeprecated,
     TJobExposeSpec,
     TJobRef,
     TJobType,
@@ -43,6 +45,7 @@ from dlt._workspace.deployment.typing import (
     TRequireSpec,
     TTimeoutSpec,
     TTrigger,
+    WORKSPACE_DEPRECATED_SINCE,
 )
 
 TJobFunParams = ParamSpec("TJobFunParams")
@@ -267,8 +270,27 @@ def _job(
     refresh_propagation: TRefreshPolicy = "auto",
     auto_refresh_pipeline_mode: Optional[TRefreshMode] = None,
     spec: Type[BaseConfiguration] = None,
+    **kwargs: Any,
 ) -> Any:
     """Common decorator implementation for all job types."""
+    # accept deprecated arg names, convert them to their replacements, warn
+    apply_deprecations(
+        TJobDefinitionDeprecated,
+        kwargs,
+        path="@job",
+        since=WORKSPACE_DEPRECATED_SINCE,
+        stacklevel=4,
+    )
+    if incremental_mode is None:
+        incremental_mode = kwargs.pop("incremental_mode", None)
+    else:
+        kwargs.pop("incremental_mode", None)
+    if refresh_propagation == "auto":
+        refresh_propagation = kwargs.pop("refresh_propagation", refresh_propagation)
+    else:
+        kwargs.pop("refresh_propagation", None)
+    if kwargs:
+        raise TypeError(f"job() got an unexpected keyword argument {next(iter(kwargs))!r}")
     _validate_job_name(name)
     _validate_job_section(section)
     wrapper: JobFactory[Any, Any] = JobFactory()
@@ -360,6 +382,7 @@ def job(
     refresh_propagation: TRefreshPolicy = "auto",
     auto_refresh_pipeline_mode: Optional[TRefreshMode] = None,
     spec: Type[BaseConfiguration] = None,
+    **kwargs: Any,
 ) -> Any:
     """Marks a function as a deployable batch job.
 
@@ -430,6 +453,7 @@ def job(
         refresh_propagation=refresh_propagation,
         auto_refresh_pipeline_mode=auto_refresh_pipeline_mode,
         spec=spec,
+        **kwargs,
     )
 
 
@@ -474,6 +498,7 @@ def interactive(
     expose: Optional[TJobExposeSpec] = None,
     require: Optional[TRequireSpec] = None,
     spec: Type[BaseConfiguration] = None,
+    **kwargs: Any,
 ) -> Any:
     """Marks a function as a deployable interactive job.
 
@@ -520,6 +545,7 @@ def interactive(
         expose=full_expose,
         require=require,
         spec=spec,
+        **kwargs,
     )
 
 
@@ -540,6 +566,7 @@ def pipeline_run(
     refresh_propagation: TRefreshPolicy = "auto",
     auto_refresh_pipeline_mode: Optional[TRefreshMode] = None,
     spec: Type[BaseConfiguration] = None,
+    **kwargs: Any,
 ) -> Callable[[Callable[TJobFunParams, TJobResult]], JobFactory[TJobFunParams, TJobResult]]:
     """Creates a job bound to a specific pipeline.
 
@@ -614,6 +641,7 @@ def pipeline_run(
             refresh_propagation=refresh_propagation,
             auto_refresh_pipeline_mode=auto_refresh_pipeline_mode,
             spec=spec,
+            **kwargs,
         )
 
     return decorator

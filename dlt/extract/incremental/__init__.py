@@ -46,6 +46,7 @@ from dlt.common.data_types.type_helpers import (
     py_type_to_sc_type,
 )
 from dlt.common.data_writers.writers import count_rows_in_items
+from dlt.common.utils import simple_repr, without_none
 from dlt.common.incremental.typing import (
     IncrementalColumnState,
     TCursorValue,
@@ -66,6 +67,7 @@ from dlt.extract.incremental.context import TimeIntervalContext, get_interval_co
 from dlt.extract.items import SupportsPipe, TTableHintTemplate
 from dlt.extract.items_transform import ItemTransform
 from dlt.extract.state import resource_state
+from dlt.extract.utils import digest_dedup_value
 from dlt.extract.incremental.transform import (
     JsonIncremental,
     ArrowIncremental,
@@ -332,17 +334,40 @@ class Incremental(
         return new
 
     def advance(self, last_value: TCursorValue) -> Self:
-        """Set `cached_state["last_value"]` and opt out of framework row filtering."""
-        if self._cached_state is None:
-            raise RuntimeError(
-                "advance() requires that bind() got called and pipeline state is available"
-            )
-
+        """Advance incremental range to `last_value` and opt out of framework row filtering."""
         if last_value is not None:
-            self._current_last_value = self._cached_state["last_value"] = last_value
-            self._cached_state["unique_hashes"] = []
+            self._current_last_value = last_value
+            if self._cached_state is not None:
+                self._cached_state["last_value"] = last_value
+                if self.end_value is None and self.is_unique_cursor():
+                    self._cached_state["unique_hashes"] = [self.cursor_value_hash(last_value)]
+                else:
+                    self._cached_state["unique_hashes"] = []
         self._advanced = True
         return self
+
+    def is_unique_cursor(self) -> bool:
+        """True when the primary key is exactly the cursor column, so cursor values are unique."""
+        pk = self.primary_key
+        if not pk or callable(pk):
+            return False
+        cursor = self.get_cursor_column_name()
+        if not cursor:
+            return False
+        return ([pk] if isinstance(pk, str) else list(pk)) == [cursor]
+
+    @staticmethod
+    def cursor_value_hash(value: Any) -> str:
+        """Dedup hash of a cursor value, identical to the row transform's unique hash so
+        SQL and row incremental modes interoperate."""
+        return digest_dedup_value(value)
+
+    def boundary_consumed(self) -> bool:
+        """True when state marks the row at `last_value` as already loaded."""
+        state = self._cached_state
+        if not state or not state.get("unique_hashes"):
+            return False
+        return self.cursor_value_hash(state["last_value"]) in state["unique_hashes"]
 
     def get_cursor_column_name(self) -> Optional[str]:
         """Return the name of the cursor column if the cursor path resolves to a single column"""
@@ -363,6 +388,9 @@ class Incremental(
         """
         # upper: explicit end_value beats the last value of the cursor
         upper = self.end_value
+        # an advanced cursor pins the upper via _current_last_value, even when unbound
+        if upper is None and self._current_last_value is not None:
+            upper = self.last_value
         lower: Optional[TCursorValue] = None
         try:
             s = self._cached_state or self.get_state()
@@ -374,26 +402,15 @@ class Incremental(
                 # raw start as persisted into state by bind()
                 lower = s.get("start_value")
 
-            if upper is None:
-                # _current_last_value may be none if incremental didn't advance or there were no rows
-                if self._cached_state is not None and self._current_last_value is None:
-                    pass
-                else:
-                    upper = self.last_value
+            # standalone instance (state read via get_state): stored last_value pins the
+            # upper; when bound but not advanced, live row filtering owns the upper
+            if upper is None and self._cached_state is None:
+                upper = self.last_value
 
         except (IncrementalUnboundError, SourceSectionNotAvailable, PipelineStateNotAvailable):
             # unbound: no state to read from. lag needs a live last_value to step
             # back from — there is none — so it is a no-op here regardless of self.lag
             lower = self.initial_value
-
-        # if self._cached_state is None:
-
-        # elif apply_lag:
-
-        #     lower = self.start_value
-        # else:
-        #     # raw start as persisted into state by bind()
-        #     lower = self._cached_state.get("start_value")
         return lower, upper
 
     def on_resolved(self) -> None:
@@ -674,12 +691,25 @@ class Incremental(
             return value
         return cls(**value)
 
+    def __repr__(self) -> str:
+        kwargs = {
+            "cursor_path": self.cursor_path,
+            "initial_value": self.initial_value,
+            "end_value": self.end_value,
+            "last_value_func": getattr(self.last_value_func, "__name__", None),
+            "primary_key": self._primary_key,
+            "lag": self.lag,
+            "range_start": None if self.range_start == "closed" else self.range_start,
+            "range_end": None if self.range_end == "open" else self.range_end,
+            "on_cursor_value_missing": (
+                None if self.on_cursor_value_missing == "raise" else self.on_cursor_value_missing
+            ),
+            "resource_name": self.resource_name,
+        }
+        return simple_repr("dlt.sources.incremental", **without_none(kwargs))
+
     def __str__(self) -> str:
-        return (
-            f"Incremental at 0x{id(self):x} for resource {self.resource_name} with cursor path:"
-            f" {self.cursor_path} initial {self.initial_value} - {self.end_value} lv_func"
-            f" {self.last_value_func}"
-        )
+        return self.__repr__()
 
     def _make_or_get_transformer(self, cls: Type[IncrementalTransform]) -> IncrementalTransform:
         if transformer := self._transformers.get(cls):

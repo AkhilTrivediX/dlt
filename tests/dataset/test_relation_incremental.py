@@ -14,7 +14,7 @@ from dlt.common.pendulum import pendulum
 from dlt.dataset._incremental import (
     _build_incremental_aggregate,
     _build_incremental_condition,
-    _parse_incremental_cursor_path,
+    parse_incremental_cursor_path,
     _RelationIncrementalContext,
 )
 
@@ -729,11 +729,11 @@ def test_incremental_inside_resource_captures_bound_sql(
 
     incremental_pipeline.extract(probe())
     assert captured is not None
-    condition = _where(captured)
-    assert isinstance(condition, sge.And)
-    start_op = condition.this
-    assert isinstance(start_op, sge.GTE)
-    assert _column_name(start_op.this) == "id"
+    # bound cursor advances: lower stays at initial_value 2, upper pinned to max id 5
+    assert (
+        _where(captured).sql(dialect="duckdb")
+        == '"id" >= CAST(2 AS BIGINT) AND "id" < CAST(5 AS BIGINT) AND NOT "id" IS NULL'
+    )
 
 
 def test_incremental_lag_on_unbound_is_no_op(incremental_dataset: dlt.Dataset) -> None:
@@ -766,12 +766,11 @@ def test_incremental_lag_applied_after_bind(incremental_pipeline: dlt.Pipeline) 
     incremental_pipeline.extract(probe())
 
     assert captured is not None
-    condition = _where(captured)
-    assert isinstance(condition, sge.And)
-    start_op = condition.this
-    assert isinstance(start_op, sge.GTE)
-    assert _column_name(start_op.this) == "id"
-    assert "CAST(3 AS BIGINT)" in start_op.expression.sql(dialect="duckdb")
+    # lag shifts the lower bound to 3; advance pins the upper at max id 5
+    assert (
+        _where(captured).sql(dialect="duckdb")
+        == '"id" >= CAST(3 AS BIGINT) AND "id" < CAST(5 AS BIGINT) AND NOT "id" IS NULL'
+    )
 
 
 def test_incremental_custom_last_value_func_raises(
@@ -880,26 +879,28 @@ def test_incremental_rejects_jsonpath_cursor(
 
 
 @pytest.mark.parametrize(
-    "cursor_path,match",
+    "cursor_path",
     [
-        pytest.param("", "non-empty string", id="empty"),
-        pytest.param("col.", "not a plain column identifier", id="trailing-dot"),
-        pytest.param(".col", "not a plain column identifier", id="leading-dot"),
-        pytest.param('"col with.dot"', "not a plain column identifier", id="quoted-with-dot"),
-        pytest.param("$.name", "JSONPath expression", id="jsonpath-root"),
-        pytest.param("items[0]", "JSONPath expression", id="array-index"),
+        pytest.param("", id="empty"),
+        pytest.param("col.", id="trailing-dot"),
+        pytest.param(".col", id="leading-dot"),
+        pytest.param('"col with.dot"', id="quoted-with-dot"),
+        pytest.param("$.name", id="jsonpath-root"),
+        pytest.param("items[0]", id="array-index"),
+        pytest.param("a.b.c", id="nested-table-path"),
+        pytest.param("events[*].col", id="jsonpath-table-part"),
     ],
 )
-def test_parse_incremental_cursor_path_rejects_malformed(cursor_path: str, match: str) -> None:
-    with pytest.raises(ValueError, match=match):
-        _parse_incremental_cursor_path(cursor_path)
+def test_parse_incremental_cursor_path_rejects_malformed(cursor_path: str) -> None:
+    with pytest.raises(ValueError, match="is not supported"):
+        parse_incremental_cursor_path(cursor_path)
 
 
 def test_incremental_rejects_quoted_cursor_with_inner_dot(
     incremental_dataset: dlt.Dataset,
 ) -> None:
     incremental = dlt.sources.incremental('"col with.dot"', initial_value=1)
-    with pytest.raises(ValueError, match="not a plain column identifier"):
+    with pytest.raises(ValueError, match="is not supported"):
         incremental_dataset.table("events").incremental(incremental)
 
 
@@ -1026,7 +1027,7 @@ def test_incremental_raise_no_warn_on_non_nullable_cursor(
     )
 
 
-def test_incremental_no_bounds_include_emits_no_where(
+def test_incremental_no_initial_value_advances_upper_include(
     incremental_pipeline: dlt.Pipeline,
 ) -> None:
     dataset = incremental_pipeline.dataset()
@@ -1046,14 +1047,13 @@ def test_incremental_no_bounds_include_emits_no_where(
     assert captured is not None
     relation = captured
 
-    assert relation.sqlglot_expression.args.get("where") is None
+    # no initial_value → no lower bound; advance pins the upper at max id 5, include keeps NULLs
+    assert _where(relation).sql(dialect="duckdb") == '"id" < CAST(5 AS BIGINT) OR "id" IS NULL'
     assert relation.is_incremental is True
-    # the aggregate over the unfiltered base should still observe the full max id (5)
-    assert relation._incremental_aggregate_relation().fetchscalar() == 5
 
 
 @pytest.mark.parametrize("policy", ["exclude", "raise"])
-def test_incremental_no_bounds_exclude_or_raise_emits_only_is_not_null(
+def test_incremental_no_initial_value_advances_upper_exclude_or_raise(
     incremental_pipeline: dlt.Pipeline, policy: Literal["exclude", "raise"]
 ) -> None:
     dataset = incremental_pipeline.dataset()
@@ -1073,15 +1073,8 @@ def test_incremental_no_bounds_exclude_or_raise_emits_only_is_not_null(
     assert captured is not None
     relation = captured
 
-    condition = _where(relation)
-    assert isinstance(condition, sge.Not), (
-        f"expected bare `IS NOT NULL` for no-bounds policy={policy!r}, "
-        f"got {type(condition).__name__}: {condition.sql()}"
-    )
-    inner = condition.this
-    assert isinstance(inner, sge.Is)
-    assert isinstance(inner.expression, sge.Null)
-    assert _column_name(inner.this) == "id"
+    # no initial_value → no lower bound; advance pins the upper at max id 5, non-null enforced
+    assert _where(relation).sql(dialect="duckdb") == '"id" < CAST(5 AS BIGINT) AND NOT "id" IS NULL'
     assert relation.is_incremental is True
 
 

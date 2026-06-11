@@ -3036,10 +3036,14 @@ def test_advance_sets_last_value_and_marks_advanced() -> None:
     assert incr._advanced is True
 
 
-def test_advance_requires_bound_incremental() -> None:
+def test_advance_unbound_pins_current_last_value() -> None:
+    # advancing an unbound cursor pins the value in-memory without touching state
     incr = dlt.sources.incremental[int]("v", initial_value=0)
-    with pytest.raises(RuntimeError, match="bind"):
-        incr.advance(10)
+    incr.advance(10)
+    assert incr._advanced is True
+    assert incr.last_value == 10
+    assert incr._cached_state is None
+    assert incr.resolve_bounds() == (0, 10)
 
 
 def test_with_cursor_advance_does_not_leak_to_original_state() -> None:

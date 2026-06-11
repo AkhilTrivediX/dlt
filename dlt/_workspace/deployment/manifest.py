@@ -17,6 +17,7 @@ from dlt.common.exceptions import DictValidationException
 from dlt.common.time import ensure_datetime_utc
 from dlt.common.typing import DictStrAny
 from dlt.common.validation import validate_dict
+from dlt.common.warnings import apply_deprecations
 from dlt.reflection.script_inspector import no_pipeline_execution
 
 from dlt._workspace.deployment.decorators import JobFactory
@@ -53,8 +54,10 @@ from dlt._workspace.deployment.typing import (
     TJobsDeploymentManifest,
     TFreshnessConstraint,
     TJobDefinition,
+    TJobDefinitionDeprecated,
     TJobRef,
     TTrigger,
+    WORKSPACE_DEPRECATED_SINCE,
     resolve_incremental_mode,
     resolve_refresh_propagation,
 )
@@ -122,13 +125,14 @@ def migrate_job_definition(
     if from_engine == to_engine:
         return job_dict  # type: ignore[return-value]
     if from_engine == 1 and to_engine > 1:
-        # engine 2: allow_external_schedulers is replaced by incremental_mode
-        if job_dict.pop("allow_external_schedulers", None):
-            job_dict["incremental_mode"] = "interval"
-        # engine 2: refresh is replaced by refresh_propagation
-        refresh = job_dict.pop("refresh", None)
-        if refresh is not None:
-            job_dict["refresh_propagation"] = refresh
+        # engine 2: allow_external_schedulers -> incremental_mode, refresh -> refresh_propagation
+        apply_deprecations(
+            TJobDefinitionDeprecated,
+            job_dict,
+            path="jobs",
+            since=WORKSPACE_DEPRECATED_SINCE,
+            warn=False,
+        )
         from_engine = 2
 
     if from_engine != to_engine:

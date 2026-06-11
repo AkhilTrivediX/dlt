@@ -10,6 +10,7 @@ import dlt
 from dlt._workspace.deployment.decorators import JobFactory, interactive, job, pipeline_run
 from dlt._workspace.deployment.exceptions import InvalidJobName, InvalidJobSection
 from dlt._workspace.deployment.typing import TTrigger
+from dlt.common.warnings import DltDeprecationWarning
 
 
 # module-level sources and resources for deliver tests
@@ -378,6 +379,77 @@ def test_job_definition_incremental_mode() -> None:
     job_def = run_pipeline.to_job_definition()
     assert job_def["allow_external_schedulers"] is True
     assert "incremental_mode" not in job_def
+
+
+def test_deprecated_refresh_kwarg_maps_to_refresh_propagation() -> None:
+    with pytest.warns(DltDeprecationWarning, match="refresh_propagation"):
+
+        @job(refresh="block")  # type: ignore[call-overload]
+        def etl():
+            pass
+
+    assert etl.refresh_propagation == "block"
+    assert etl.to_job_definition()["refresh"] == "block"
+
+
+def test_deprecated_allow_external_schedulers_maps_to_incremental_mode() -> None:
+    with pytest.warns(DltDeprecationWarning, match="incremental_mode"):
+
+        @job(allow_external_schedulers=True, interval={"start": "2024-01-01T00:00:00Z"})  # type: ignore[call-overload]
+        def etl():
+            pass
+
+    assert etl.incremental_mode == "interval"
+    assert etl.to_job_definition()["allow_external_schedulers"] is True
+
+    # False must not force a mode (SkipDeprecation), leaving both keys absent
+    with pytest.warns(DltDeprecationWarning):
+
+        @job(allow_external_schedulers=False)  # type: ignore[call-overload]
+        def etl_off():
+            pass
+
+    assert etl_off.incremental_mode is None
+    job_def = etl_off.to_job_definition()
+    assert "allow_external_schedulers" not in job_def
+    assert "incremental_mode" not in job_def
+
+
+def test_deprecated_and_new_arg_prefers_new() -> None:
+    with pytest.warns(DltDeprecationWarning):
+
+        @job(refresh="block", refresh_propagation="always")  # type: ignore[call-overload]
+        def etl():
+            pass
+
+    assert etl.refresh_propagation == "always"
+
+
+def test_unknown_kwarg_still_raises_type_error() -> None:
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+
+        @job(refrsh="block")  # type: ignore[call-overload]
+        def etl():
+            pass
+
+
+def test_deprecated_kwarg_routed_through_pipeline_run_and_interactive() -> None:
+    # pipeline_run and interactive forward **kwargs into _job, so the same deprecation applies
+    with pytest.warns(DltDeprecationWarning, match="refresh_propagation"):
+
+        @pipeline_run("my_pipeline", refresh="always")
+        def pr():
+            pass
+
+    assert pr.refresh_propagation == "always"
+
+    with pytest.warns(DltDeprecationWarning, match="refresh_propagation"):
+
+        @interactive(refresh="always")  # type: ignore[call-overload]
+        def it():
+            pass
+
+    assert it.refresh_propagation == "always"
 
 
 def test_job_definition_auto_refresh_pipeline_mode() -> None:

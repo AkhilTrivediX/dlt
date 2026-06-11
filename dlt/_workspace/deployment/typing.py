@@ -2,10 +2,13 @@ from datetime import datetime  # noqa: I251
 from typing import Any, Dict, List, Literal, Mapping, NamedTuple, NewType, Optional, Union
 
 from dlt.common.pipeline import TRefreshMode
-from dlt.common.typing import NotRequired, TypedDict
+from dlt.common.typing import Annotated, NotRequired, TypedDict
+from dlt.common.warnings import Deprecated, SkipDeprecation
 
 
 MANIFEST_ENGINE_VERSION = 2
+WORKSPACE_DEPRECATED_SINCE = "1.29.0"
+"""dlt version the job-definition field renames were introduced in."""
 REQUIREMENTS_ENGINE_VERSION = 1
 MAIN_GROUP = "main"
 """Conventional group name for top-level workspace dependencies."""
@@ -304,6 +307,24 @@ def resolve_refresh_propagation(d: Mapping[str, Any]) -> TRefreshPolicy:
     """Resolves refresh propagation policy from a job definition, preferring
     `refresh_propagation` over the deprecated `refresh` field."""
     return d.get("refresh_propagation") or d.get("refresh") or "auto"
+
+
+def _bool_to_incremental_mode(allow_external: bool) -> Any:
+    # False writes nothing so a legacy flag never forces `pipeline` mode
+    return "interval" if allow_external else SkipDeprecation
+
+
+class TJobDefinitionDeprecated(TypedDict, total=False):
+    """Deprecated job-definition fields and their replacements.
+
+    Single source of the old to new field mapping, consumed by `apply_deprecations` at the
+    job decorators and by `migrate_job_definition`.
+    """
+
+    refresh: Annotated[TRefreshPolicy, Deprecated(maps_to="refresh_propagation")]
+    allow_external_schedulers: Annotated[
+        bool, Deprecated(maps_to="incremental_mode", convert=_bool_to_incremental_mode)
+    ]
 
 
 class TJobsDeploymentManifest(TypedDict):
